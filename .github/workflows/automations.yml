@@ -32,3 +32,13 @@ jobs:
 
       - name: Ejecutar Screener
         run: python screener.py
+      - name: Guardar Historial de Alertas
+        run: |
+          git config --global user.name 'bot-screener'
+          git config --global user.email 'bot@screener.com'
+          git add alertas_enviadas.json || true
+          git commit -m "Auto-update historial de alertas [skip ci]" || true
+          git push || true
+    
+        
+
