@@ -1,5 +1,5 @@
 # ==============================================================================
-# SCREENER & MONITOR DE CARTERA VALUE CON WATCHLIST, HTML PRO Y ANTI-SPAM (7 DÍAS)
+# SCREENER VALUE & MONITOR CON SYSTEM SCORE COMPLETO (SINCRO + ESTILOS)
 # ==============================================================================
 
 import datetime
@@ -11,68 +11,34 @@ import requests
 import yfinance as yf
 
 # ==============================================================================
-# CONFIGURACIÓN GENERAL Y ENLACES DE GOOGLE SHEETS
+# CONFIGURACIÓN GENERAL Y ENLACES
 # ==============================================================================
-# Enlace publicado como CSV de tu pestaña CARTERA
 URL_CARTERA_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRbLGRdor-TtNOtkqL0cbrTnUN0mg6-FLM-3yAxuZsznZRUJjeqoyWC7ZubG6kp1SEgYvcryTnb1eyE/pub?gid=0&single=true&output=csv"
 
 # Enlace publicado como CSV de tu pestaña WATCHLIST (deja vacío "" si aún no la publicas)
 URL_WATCHLIST_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRbLGRdor-TtNOtkqL0cbrTnUN0mg6-FLM-3yAxuZsznZRUJjeqoyWC7ZubG6kp1SEgYvcryTnb1eyE/pub?gid=440350475&single=true&output=csv"
 
-# Credenciales de Telegram
+
 TELEGRAM_TOKEN = "8813853886:AAEh6iYqi7YnnXk_HzeTTuHMDOX6Q153Ero"
 TELEGRAM_CHAT_ID = "928199102"
 
-# Configuración Anti-Spam
 ARCHIVO_HISTORIAL = "alertas_enviadas.json"
-DIAS_ENFRIAMIENTO = 7  # Días que el bot "guardará silencio" para la misma alerta
+DIAS_ENFRIAMIENTO = 7
 
 
 # ==============================================================================
-# ETAPA 1: LECTURA DE CARTERA Y WATCHLIST DESDE GOOGLE SHEETS
+# ETAPA 1: LECTURA DE GOOGLE SHEETS
 # ==============================================================================
 def cargar_cartera_online(url_csv: str) -> pd.DataFrame:
-    """Lee la hoja de cartera desde la web."""
     if not url_csv or "PEGA_AQUI" in url_csv:
         return pd.DataFrame()
 
     try:
         df = pd.read_csv(url_csv)
-        cols_interes = {
-            "Ticker": "Ticker",
-            "Precio USD": "Precio_USD_Excel",
-            "Cantidad en el mercado": "Cantidad",
-            "total remanente": "Inversion_Viva",
-            "monto actual": "Monto_Actual",
-            "Rend. Neto": "Rend_Neto_USD",
-            "rendimiento": "Rendimiento_Pct",
-            "Categoria": "Categoria",
-        }
+        if "Ticker" not in df.columns:
+            return pd.DataFrame()
 
-        cols_existentes = {k: v for k, v in cols_interes.items() if k in df.columns}
-        df_sub = df[list(cols_existentes.keys())].rename(columns=cols_existentes).copy()
-
-        def limpiar_numero(val):
-            if pd.isna(val) or val == "":
-                return 0.0
-            val_str = str(val).replace("$", "").replace("%", "").replace(" ", "").strip()
-            if "," in val_str and "." in val_str:
-                val_str = val_str.replace(".", "").replace(",", ".")
-            elif "," in val_str:
-                val_str = val_str.replace(",", ".")
-            try:
-                return float(val_str)
-            except ValueError:
-                return 0.0
-
-        for col in df_sub.columns:
-            if col != "Ticker" and col != "Categoria":
-                df_sub[col] = df_sub[col].apply(limpiar_numero)
-
-        if "Categoria" in df_sub.columns:
-            mask = df_sub["Categoria"].astype(str).str.contains(r"accion\s*us", flags=re.IGNORECASE, regex=True)
-            df_sub = df_sub[mask].copy()
-
+        df_sub = df[["Ticker"]].copy() if "Ticker" in df.columns else pd.DataFrame()
         df_sub = df_sub[df_sub["Ticker"].astype(str).str.strip() != ""].copy()
         df_sub["Origen"] = "CARTERA"
         return df_sub
@@ -82,7 +48,6 @@ def cargar_cartera_online(url_csv: str) -> pd.DataFrame:
 
 
 def cargar_watchlist_online(url_csv: str) -> pd.DataFrame:
-    """Lee los Tickers de la pestaña Watchlist."""
     if not url_csv or "PEGA_AQUI" in url_csv:
         return pd.DataFrame()
 
@@ -101,7 +66,7 @@ def cargar_watchlist_online(url_csv: str) -> pd.DataFrame:
 
 
 # ==============================================================================
-# ETAPA 2: CÁLCULOS TÉCNICOS Y FUNDAMENTALES (yfinance)
+# ETAPA 2: CÁLCULOS DE MÉTRICAS Y SCORE
 # ==============================================================================
 def calcular_rsi(series: pd.Series, period: int = 14) -> float:
     delta = series.diff()
@@ -122,6 +87,7 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
         if len(hist) < 200:
             return {}
 
+        # 1. Indicadores Técnicos
         hist["EMA200"] = hist["Close"].ewm(span=200, adjust=False).mean()
         precio_actual = hist["Close"].iloc[-1]
         ema200_actual = hist["EMA200"].iloc[-1]
@@ -130,35 +96,103 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
         rsi = calcular_rsi(hist["Close"], 14)
 
         hist["Dist_EMA200_Hist"] = ((hist["Close"] - hist["EMA200"]) / hist["EMA200"]) * 100
-        desvio_superior_prom = hist[hist["Dist_EMA200_Hist"] > 0]["Dist_EMA200_Hist"].mean()
         desvio_inferior_prom = hist[hist["Dist_EMA200_Hist"] < 0]["Dist_EMA200_Hist"].mean()
 
+        low_52 = hist["Low"].tail(252).min()
+        high_52 = hist["High"].tail(252).max()
+        pos_52_pct = ((precio_actual - low_52) / (high_52 - low_52)) * 100 if high_52 > low_52 else 50.0
+
+        # 2. Datos Fundamentales
         info = t.info
-        pe_current = info.get("trailingPE", None)
+        market_cap = info.get("marketCap", 0)
+        free_cashflow = info.get("freeCashflow", None)
+        fcf_yield = (free_cashflow / market_cap * 100) if (free_cashflow and market_cap) else None
+
         peg_ratio = info.get("pegRatio", None)
-        target_price = info.get("targetMeanPrice", None)
         roe = info.get("returnOnEquity", None)
+        roe_pct = roe * 100 if roe else None
+
+        debt_to_equity = info.get("debtToEquity", None)
+        current_ratio = info.get("currentRatio", None)
+
         revenue_growth = info.get("revenueGrowth", None)
+        rev_growth_pct = revenue_growth * 100 if revenue_growth else None
+
+        earnings_growth = info.get("earningsGrowth", None)
+        earn_growth_pct = earnings_growth * 100 if earnings_growth else None
+
         profit_margins = info.get("profitMargins", None)
+        target_price = info.get("targetMeanPrice", None)
 
         upside_target_pct = None
         if target_price and precio_actual > 0:
             upside_target_pct = ((target_price - precio_actual) / precio_actual) * 100
 
+        # CÁLCULO DEL SCORE
+        score_fund = 0
+        score_tec = 0
+        score_riesgo = 0
+
+        if fcf_yield is not None:
+            if fcf_yield > 5.0:
+                score_fund += 2
+            elif 3.0 <= fcf_yield <= 5.0:
+                score_fund += 1
+
+        if roe_pct is not None and debt_to_equity is not None:
+            if roe_pct > 15.0 and debt_to_equity < 100.0:
+                score_fund += 2
+            elif debt_to_equity > 200.0:
+                score_fund -= 2
+
+        if current_ratio and current_ratio > 1.5:
+            score_fund += 1
+
+        if rev_growth_pct is not None and earn_growth_pct is not None:
+            if rev_growth_pct > 10.0 and earn_growth_pct > 10.0:
+                score_fund += 2
+            elif rev_growth_pct > 10.0 or earn_growth_pct > 10.0:
+                score_fund += 1
+            elif rev_growth_pct < 0.0 and earn_growth_pct < 0.0:
+                score_fund -= 2
+
+        if pd.notna(desvio_inferior_prom) and dist_ema200_pct <= desvio_inferior_prom and rsi < 45:
+            score_tec += 2
+        
+        if rsi > 75:
+            score_tec -= 1
+
+        if rev_growth_pct is not None and rev_growth_pct < 0.0 and (profit_margins and profit_margins < 0.05):
+            score_riesgo -= 3
+
+        score_total = score_fund + score_tec + score_riesgo
+
+        if score_total >= 6:
+            tier = "🟢 PRIORITARIO"
+        elif 2 <= score_total <= 5:
+            tier = "🟡 VIGILAR"
+        elif -1 <= score_total <= 1:
+            tier = "⚪ NEUTRAL"
+        else:
+            tier = "🔴 TRAMPA"
+
         return {
+            "Ticker": ticker_sym,
             "Precio_Live": round(precio_actual, 2),
-            "EMA200": round(ema200_actual, 2),
+            "Score_Total": score_total,
+            "Score_Fund": score_fund,
+            "Score_Tec": score_tec,
+            "Tier": tier,
+            "FCF_Yield_%": round(fcf_yield, 2) if fcf_yield is not None else None,
             "Dist_EMA200_%": round(dist_ema200_pct, 2),
-            "Desvio_Inf_Prom_%": round(desvio_inferior_prom, 2) if pd.notna(desvio_inferior_prom) else 0.0,
-            "Desvio_Sup_Prom_%": round(desvio_superior_prom, 2) if pd.notna(desvio_superior_prom) else 0.0,
             "RSI": round(rsi, 2) if pd.notna(rsi) else None,
-            "PER": round(pe_current, 2) if pe_current else "N/A",
-            "PEG": round(peg_ratio, 2) if peg_ratio else "N/A",
-            "ROE_%": round(roe * 100, 2) if roe else "N/A",
-            "Ventas_Growth_%": round(revenue_growth * 100, 2) if revenue_growth else "N/A",
-            "Margen_Neto_%": round(profit_margins * 100, 2) if profit_margins else "N/A",
-            "Target_Analistas": round(target_price, 2) if target_price else "N/A",
-            "Upside_Target_%": round(upside_target_pct, 2) if upside_target_pct else "N/A",
+            "Pos_52W_%": round(pos_52_pct, 1),
+            "PEG": round(peg_ratio, 2) if peg_ratio else None,
+            "ROE_%": round(roe_pct, 2) if roe_pct else None,
+            "D/E": round(debt_to_equity, 1) if debt_to_equity else None,
+            "Current_Ratio": round(current_ratio, 2) if current_ratio else None,
+            "Ventas_Growth_%": round(rev_growth_pct, 2) if rev_growth_pct else None,
+            "Upside_Target_%": round(upside_target_pct, 2) if upside_target_pct else None,
         }
     except Exception as e:
         print(f"Error procesando {ticker_sym}: {e}")
@@ -166,7 +200,7 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
 
 
 # ==============================================================================
-# ETAPA 3: REGLAS DE ALERTAS VALUE Y CONTROL ANTI-SPAM (HISTORIAL JSON)
+# ETAPA 3: ALERTAS Y TELEGRAM
 # ==============================================================================
 def enviar_telegram(mensaje: str):
     if not TELEGRAM_TOKEN:
@@ -188,9 +222,9 @@ def enviar_documento_telegram(ruta_archivo: str, caption: str = ""):
             files = {"document": doc}
             data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
             requests.post(url, data=data, files=files, timeout=10)
-            print("  📄 Reporte HTML adjuntado enviado con éxito a Telegram.")
+            print("  📄 Reporte HTML enviado a Telegram.")
     except Exception as e:
-        print(f"Error enviando documento a Telegram: {e}")
+        print(f"Error enviando documento: {e}")
 
 
 def cargar_historial_alertas() -> dict:
@@ -212,138 +246,105 @@ def guardar_historial_alertas(historial: dict):
 
 
 def evaluar_condiciones_alerta(row: pd.Series, historial: dict) -> str:
-    sugerencias = []
     ticker = row["Ticker"]
     origen = row.get("Origen", "CARTERA")
     precio = row["Precio_Live"]
-    dist_ema200 = row.get("Dist_EMA200_%", 0)
-    desvio_inf = row.get("Desvio_Inf_Prom_%", 0)
-    peg = row.get("PEG", "N/A")
-    roe = row.get("ROE_%", "N/A")
-    upside = row.get("Upside_Target_%", "N/A")
-    rsi = row.get("RSI", 50)
-    ventas_growth = row.get("Ventas_Growth_%", "N/A")
+    score_total = row.get("Score_Total", 0)
+    tier = row.get("Tier", "⚪ NEUTRAL")
 
     prefijo = "👀 WATCHLIST" if origen == "WATCHLIST" else "💼 CARTERA"
     fecha_actual = datetime.date.today()
 
     def procesar_alerta(tipo_alerta: str, mensaje: str):
         clave_unica = f"{ticker}_{tipo_alerta}"
-        sugerencias.append(tipo_alerta)
-
         debe_enviar = True
         if clave_unica in historial:
             try:
                 fecha_ultima_envio = datetime.datetime.strptime(historial[clave_unica], "%Y-%m-%d").date()
-                dias_transcurridos = (fecha_actual - fecha_ultima_envio).days
-
-                if dias_transcurridos < DIAS_ENFRIAMIENTO:
+                if (fecha_actual - fecha_ultima_envio).days < DIAS_ENFRIAMIENTO:
                     debe_enviar = False
-                    print(f"  🔕 Alerta omitida (Silenciado {dias_transcurridos}/{DIAS_ENFRIAMIENTO} días) para {ticker}: {tipo_alerta}")
             except Exception:
                 debe_enviar = True
 
         if debe_enviar:
             enviar_telegram(mensaje)
             historial[clave_unica] = fecha_actual.strftime("%Y-%m-%d")
-            print(f"  🔔 Alerta NUEVA enviada para {ticker}: {tipo_alerta}")
 
-    # REGLA 1: Descuento Histórico respecto a EMA 200
-    if isinstance(dist_ema200, (int, float)) and isinstance(desvio_inf, (int, float)):
-        if dist_ema200 <= desvio_inf:
-            msg = f"🟢 *{prefijo}: PISO HISTÓRICO ({ticker})*\n• Precio: ${precio}\n• Dist. EMA200: {dist_ema200}%\n• Piso Promedio: {desvio_inf}%"
-            procesar_alerta("PISO HISTÓRICO 🟢", msg)
+    if score_total >= 6:
+        msg = f"🌟 *{prefijo}: OPORTUNIDAD TOP ({ticker})*\n• Score: {score_total}\n• Estado: {tier}\n• Precio: ${precio}"
+        procesar_alerta("OPORTUNIDAD TOP 🌟", msg)
+    elif score_total <= -2:
+        msg = f"⚠️ *{prefijo}: RIESGO / TRAMPA ({ticker})*\n• Score: {score_total}\n• Estado: {tier}\n• Precio: ${precio}"
+        procesar_alerta("ALERTA TRAMPA ⚠️", msg)
 
-    # REGLA 2: Oportunidad Value (PEG < 1.0 y ROE > 15%)
-    if isinstance(peg, (int, float)) and isinstance(roe, (int, float)):
-        if peg < 1.0 and roe > 15.0:
-            msg = f"⭐ *{prefijo}: OPORTUNIDAD VALUE ({ticker})*\n• PEG: {peg} (Atractivo)\n• ROE: {roe}% (Negocio Excelente)"
-            procesar_alerta("VALUE / ALTA CALIDAD ⭐", msg)
-
-    # REGLA 3: Descuento Extremo de Analistas + Sobrevendido
-    if isinstance(upside, (int, float)) and isinstance(rsi, (int, float)):
-        if upside >= 30.0 and rsi <= 40.0:
-            msg = f"🎯 *{prefijo}: OPORTUNIDAD OVERSOLD ({ticker})*\n• Upside Estimado: +{upside}%\n• RSI: {rsi}"
-            procesar_alerta("DESCUENTO ANALISTAS 🎯", msg)
-
-    # REGLA 4: Alerta de Riesgo (Trampa de Valor)
-    if isinstance(dist_ema200, (int, float)) and isinstance(ventas_growth, (int, float)):
-        if dist_ema200 < -15.0 and ventas_growth < 0.0:
-            msg = f"⚠️ *{prefijo}: ALERTA DE RIESGO ({ticker})*\n• La acción cae ({dist_ema200}%) y sus Ventas se contraen ({ventas_growth}%)"
-            procesar_alerta("TRAMPA DE VALOR ⚠️", msg)
-
-    return " | ".join(sugerencias) if sugerencias else "MANTENER"
+    return tier
 
 
 # ==============================================================================
-# ETAPA 4: GENERACIÓN DE REPORTE HTML CON ESTILOS DARK MODE & COLORES
+# ETAPA 4: HTML Y ESTILOS POR INDICADOR
 # ==============================================================================
-def aplicar_estilos_celda(row):
-    estilos = {}
+def obtener_estilo_columna(col: str, val):
+    if pd.isna(val) or val is None or val == "N/A":
+        return "", "N/A"
 
-    dist = row.get("Dist_EMA200_%", 0)
-    piso = row.get("Desvio_Inf_Prom_%", 0)
-    if isinstance(dist, (int, float)) and isinstance(piso, (int, float)):
-        if dist <= piso:
-            estilos["Dist_EMA200_%"] = "class='bg-verde'"
-        elif dist > 15:
-            estilos["Dist_EMA200_%"] = "class='bg-rojo'"
+    try:
+        val_num = float(val)
+        val_fmt = f"{val_num:.2f}"
+    except ValueError:
+        return "", str(val)
 
-    rsi = row.get("RSI", None)
-    if isinstance(rsi, (int, float)):
-        if rsi <= 35:
-            estilos["RSI"] = "class='bg-verde'"
-        elif rsi >= 70:
-            estilos["RSI"] = "class='bg-rojo'"
+    # Reglas de color por indicador
+    if col == "Score_Total":
+        if val_num >= 6: return "class='bg-verde'", val_fmt
+        if val_num <= -2: return "class='bg-rojo'", val_fmt
 
-    peg = row.get("PEG", None)
-    if isinstance(peg, (int, float)):
-        if peg < 1.0:
-            estilos["PEG"] = "class='bg-verde'"
-        elif peg > 2.5:
-            estilos["PEG"] = "class='bg-rojo'"
+    elif col == "FCF_Yield_%":
+        if val_num > 5.0: return "class='txt-verde'", val_fmt
+        if val_num < 0: return "class='txt-rojo'", val_fmt
 
-    roe = row.get("ROE_%", None)
-    if isinstance(roe, (int, float)) and roe >= 15.0:
-        estilos["ROE_%"] = "class='bg-verde'"
+    elif col == "RSI":
+        if val_num < 35: return "class='bg-verde'", val_fmt
+        if val_num > 70: return "class='bg-rojo'", val_fmt
 
-    vg = row.get("Ventas_Growth_%", None)
-    if isinstance(vg, (int, float)):
-        if vg > 10.0:
-            estilos["Ventas_Growth_%"] = "class='bg-verde'"
-        elif vg < 0.0:
-            estilos["Ventas_Growth_%"] = "class='bg-rojo'"
+    elif col == "Dist_EMA200_%":
+        if val_num < -10: return "class='txt-verde'", val_fmt
+        if val_num > 30: return "class='txt-rojo'", val_fmt
 
-    upside = row.get("Upside_Target_%", None)
-    if isinstance(upside, (int, float)) and upside >= 25.0:
-        estilos["Upside_Target_%"] = "class='bg-verde'"
+    elif col == "ROE_%":
+        if val_num > 15: return "class='txt-verde'", val_fmt
 
-    origen = str(row.get("Origen", ""))
-    estilos["Origen"] = "class='badge badge-cartera'" if origen == "CARTERA" else "class='badge badge-watchlist'"
+    elif col == "D/E":
+        if val_num > 200: return "class='txt-rojo'", val_fmt
+        if val_num < 100: return "class='txt-verde'", val_fmt
 
-    sug = str(row.get("Sugerencia", ""))
-    if "PISO" in sug or "VALUE" in sug or "OVERSOLD" in sug:
-        estilos["Sugerencia"] = "class='badge badge-compra'"
-    elif "TRAMPA" in sug or "VENTA" in sug:
-        estilos["Sugerencia"] = "class='badge badge-venta'"
-    else:
-        estilos["Sugerencia"] = "class='badge badge-neutral'"
+    elif col == "Current_Ratio":
+        if val_num > 1.5: return "class='txt-verde'", val_fmt
 
-    return estilos
+    return "", val_fmt
 
 
 def generar_reporte_html(df: pd.DataFrame) -> str:
-    filas_html = []
     cols = df.columns.tolist()
+    filas_html = []
 
     for _, row in df.iterrows():
-        estilos = aplicar_estilos_celda(row)
         celdas = []
         for col in cols:
             val = row[col]
-            val_fmt = f"{val:.2f}" if isinstance(val, float) else str(val)
-            css_class = estilos.get(col, "")
-            celdas.append(f"<td {css_class}>{val_fmt}</td>")
+
+            if col == "Tier":
+                t_str = str(val)
+                cls = "badge-compra" if "PRIORITARIO" in t_str else ("badge-cartera" if "VIGILAR" in t_str else ("badge-venta" if "TRAMPA" in t_str else "badge-neutral"))
+                celdas.append(f"<td><span class='badge {cls}'>{t_str}</span></td>")
+
+            elif col == "Origen":
+                o_str = str(val)
+                cls = "badge-cartera" if o_str == "CARTERA" else "badge-watchlist"
+                celdas.append(f"<td><span class='badge {cls}'>{o_str}</span></td>")
+
+            else:
+                css_class, val_fmt = obtener_estilo_columna(col, val)
+                celdas.append(f"<td {css_class}>{val_fmt}</td>")
 
         filas_html.append(f"<tr>{''.join(celdas)}</tr>")
 
@@ -356,18 +357,19 @@ def generar_reporte_html(df: pd.DataFrame) -> str:
     <head>
         <meta charset="utf-8">
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #e2e8f0; padding: 20px; margin: 0; }}
-            .header-container {{ text-align: center; margin-bottom: 25px; }}
-            h2 {{ color: #38bdf8; font-size: 24px; margin-bottom: 5px; }}
-            p.subtitle {{ color: #94a3b8; font-size: 13px; }}
-            .table-container {{ overflow-x: auto; background: #1e293b; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }}
-            table {{ width: 100%; border-collapse: collapse; font-size: 13px; text-align: center; }}
-            th {{ background-color: #0f172a; color: #94a3b8; padding: 14px 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #334155; }}
-            td {{ padding: 12px 10px; border-bottom: 1px solid #334155; white-space: nowrap; }}
+            body {{ font-family: 'Segoe UI', sans-serif; background-color: #0f172a; color: #e2e8f0; padding: 15px; margin: 0; }}
+            h2 {{ color: #38bdf8; text-align: center; margin-bottom: 5px; }}
+            p.subtitle {{ color: #94a3b8; text-align: center; font-size: 12px; margin-bottom: 20px; }}
+            .table-container {{ overflow-x: auto; background: #1e293b; border-radius: 8px; border: 1px solid #334155; }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 12px; text-align: center; }}
+            th {{ background-color: #0f172a; color: #94a3b8; padding: 10px; border-bottom: 2px solid #334155; }}
+            td {{ padding: 8px 6px; border-bottom: 1px solid #334155; white-space: nowrap; }}
             tr:hover {{ background-color: #334155; }}
-            .bg-verde {{ background-color: rgba(34, 197, 94, 0.2) !important; color: #4ade80 !important; font-weight: bold; }}
-            .bg-rojo {{ background-color: rgba(239, 68, 68, 0.2) !important; color: #f87171 !important; font-weight: bold; }}
-            .badge {{ padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; display: inline-block; }}
+            .bg-verde {{ background-color: rgba(34, 197, 94, 0.25) !important; color: #4ade80 !important; font-weight: bold; }}
+            .bg-rojo {{ background-color: rgba(239, 68, 68, 0.25) !important; color: #f87171 !important; font-weight: bold; }}
+            .txt-verde {{ color: #4ade80 !important; font-weight: bold; }}
+            .txt-rojo {{ color: #f87171 !important; font-weight: bold; }}
+            .badge {{ padding: 3px 8px; border-radius: 12px; font-size: 10px; font-weight: bold; }}
             .badge-cartera {{ background: #0284c7; color: white; }}
             .badge-watchlist {{ background: #6366f1; color: white; }}
             .badge-compra {{ background: #16a34a; color: white; }}
@@ -376,18 +378,12 @@ def generar_reporte_html(df: pd.DataFrame) -> str:
         </style>
     </head>
     <body>
-        <div class="header-container">
-            <h2>📈 Monitor de Cartera & Watchlist Value</h2>
-            <p class="subtitle">Resumen ejecutivo generado automáticamente</p>
-        </div>
+        <h2>📈 Monitor Value Score System</h2>
+        <p class="subtitle">Ordenado por Score Total</p>
         <div class="table-container">
             <table>
-                <thead>
-                    <tr>{headers_html}</tr>
-                </thead>
-                <tbody>
-                    {body_html}
-                </tbody>
+                <thead><tr>{headers_html}</tr></thead>
+                <tbody>{body_html}</tbody>
             </table>
         </div>
     </body>
@@ -411,62 +407,41 @@ def ejecutar_screener_cartera():
     df_total = pd.concat([df_cartera, df_watchlist], ignore_index=True)
 
     if df_total.empty:
-        print("⚠️ No se encontraron activos para procesar.")
-        return None
-
-    cant_activos = len(df_total)
-    print(f"✅ {cant_activos} activos listados para analizar. Procesando métricas...\n")
+        print("⚠️ No se encontraron activos.")
+        return
 
     historial_alertas = cargar_historial_alertas()
 
     resultados = []
     for _, fila in df_total.iterrows():
         ticker = str(fila["Ticker"]).strip()
-        print(f"📊 Analizando: {ticker}...")
+        origen = fila.get("Origen", "CARTERA")
+        print(f"📊 Evaluando Score: {ticker}...")
 
         metricas = obtener_metricas_completas(ticker)
         if not metricas:
             continue
 
-        registro = {**fila.to_dict(), **metricas}
-        registro["Sugerencia"] = evaluar_condiciones_alerta(registro, historial_alertas)
-        resultados.append(registro)
+        metricas["Origen"] = origen
+        metricas["Estado_Alerta"] = evaluar_condiciones_alerta(metricas, historial_alertas)
+        resultados.append(metricas)
 
     guardar_historial_alertas(historial_alertas)
 
     df_final = pd.DataFrame(resultados)
+    df_final = df_final.sort_values(by="Score_Total", ascending=False).reset_index(drop=True)
 
     cols_orden = [
-        "Origen",
-        "Ticker",
-        "Precio_Live",
-        "Dist_EMA200_%",
-        "Desvio_Inf_Prom_%",
-        "RSI",
-        "PER",
-        "PEG",
-        "ROE_%",
-        "Ventas_Growth_%",
-        "Margen_Neto_%",
-        "Upside_Target_%",
-        "Sugerencia",
+        "Score_Total", "Score_Fund", "Score_Tec", "Tier", "Origen",
+        "Ticker", "Precio_Live", "FCF_Yield_%", "Dist_EMA200_%", "RSI",
+        "Pos_52W_%", "PEG", "ROE_%", "D/E", "Current_Ratio", "Ventas_Growth_%", "Upside_Target_%"
     ]
 
     df_reporte = df_final[cols_orden].copy()
 
-    # Consola
-    print("\n" + "=" * 110)
-    print("📈 TABLA CONSOLIDADA SCREENER")
-    print("=" * 110)
-    print(df_reporte.to_string(index=False))
-
-    # Adjuntar HTML a Telegram
     ruta_html = generar_reporte_html(df_reporte)
-    enviar_documento_telegram(ruta_html, caption="📊 Reporte consolidado adjunto del Screener.")
-
-    return df_final
+    enviar_documento_telegram(ruta_html, caption="📊 Reporte consolidado con Score System adjunto.")
 
 
-# --- EJECUCIÓN DIRECTA ---
 if __name__ == "__main__":
     ejecutar_screener_cartera()
