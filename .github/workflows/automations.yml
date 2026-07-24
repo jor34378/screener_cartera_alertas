@@ -2,14 +2,10 @@ name: Screener Cartera Telegram
 
 on:
   schedule:
-    # Horarios en UTC (Adaptado para días hábiles de Mercado US)
-    # 13:30 UTC = Apertura Mercado (10:30 hs Argentina)
-    - cron: '30 13 * * 1-5'
-    # 17:00 UTC = Mitad de Rueda (14:00 hs Argentina)
-    - cron: '0 17 * * 1-5'
-    # 20:00 UTC = Cierre de Mercado (17:00 hs Argentina)
-    - cron: '0 20 * * 1-5'
-  
+    # 11:07 hs Argentina (10:07 hs USA / 14:07 UTC)
+    - cron: '7 14 * * 1-5'
+    # 15:34 hs Argentina (14:34 hs USA / 18:34 UTC)
+    - cron: '34 18 * * 1-5'
   # Permite ejecutarlo manualmente desde GitHub cuando quieras con un clic
   workflow_dispatch:
 
