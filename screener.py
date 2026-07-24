@@ -1,5 +1,5 @@
 # ==============================================================================
-# SCREENER VALUE & MONITOR CON SYSTEM SCORE COMPLETO (SINCRO + ESTILOS)
+# SCREENER VALUE & MONITOR CON SYSTEM SCORE COMPLETO + FILTROS + DESVÍOS EMA
 # ==============================================================================
 
 import datetime
@@ -27,8 +27,33 @@ DIAS_ENFRIAMIENTO = 7
 
 
 # ==============================================================================
-# ETAPA 1: LECTURA DE GOOGLE SHEETS
+# ETAPA 1: LECTURA DE GOOGLE SHEETS (CON FILTRO DE CATEGORÍA/ESTADO)
 # ==============================================================================
+def aplicar_filtro_categoria(df: pd.DataFrame) -> pd.DataFrame:
+    """Filtra filas inactivas o ignoradas si existe una columna de estado/categoría/filtro."""
+    if df.empty:
+        return df
+
+    # Buscar columnas habituales de filtro
+    cols_posibles = [col for col in df.columns if str(col).strip().upper() in [
+        "FILTRO", "CATEGORIA", "ESTADO", "ANALIZAR", "ACTIVO", "INCLUIR", "STATUS"
+    ]]
+
+    if not cols_posibles:
+        return df
+
+    col_filtro = cols_posibles[0]
+    
+    # Normalizar valores a string
+    val_filtro = df[col_filtro].astype(str).str.strip().str.upper()
+
+    # Descartar filas explícitamente desactivadas
+    valores_excluir = ["NO", "IGNORAR", "INACTIVO", "FALSE", "0", "OFF", "DESACTIVADO", "N"]
+    df_filtrado = df[~val_filtro.isin(valores_excluir)].copy()
+
+    return df_filtrado
+
+
 def cargar_cartera_online(url_csv: str) -> pd.DataFrame:
     if not url_csv or "PEGA_AQUI" in url_csv:
         return pd.DataFrame()
@@ -38,7 +63,9 @@ def cargar_cartera_online(url_csv: str) -> pd.DataFrame:
         if "Ticker" not in df.columns:
             return pd.DataFrame()
 
-        df_sub = df[["Ticker"]].copy() if "Ticker" in df.columns else pd.DataFrame()
+        df = aplicar_filtro_categoria(df)
+
+        df_sub = df[["Ticker"]].copy()
         df_sub = df_sub[df_sub["Ticker"].astype(str).str.strip() != ""].copy()
         df_sub["Origen"] = "CARTERA"
         return df_sub
@@ -56,6 +83,8 @@ def cargar_watchlist_online(url_csv: str) -> pd.DataFrame:
         if "Ticker" not in df.columns:
             return pd.DataFrame()
 
+        df = aplicar_filtro_categoria(df)
+
         df_sub = df[["Ticker"]].copy()
         df_sub = df_sub[df_sub["Ticker"].astype(str).str.strip() != ""].copy()
         df_sub["Origen"] = "WATCHLIST"
@@ -66,7 +95,7 @@ def cargar_watchlist_online(url_csv: str) -> pd.DataFrame:
 
 
 # ==============================================================================
-# ETAPA 2: CÁLCULOS DE MÉTRICAS Y SCORE
+# ETAPA 2: CÁLCULOS DE MÉTRICAS, DESVÍOS Y SCORE
 # ==============================================================================
 def calcular_rsi(series: pd.Series, period: int = 14) -> float:
     delta = series.diff()
@@ -87,7 +116,7 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
         if len(hist) < 200:
             return {}
 
-        # 1. Indicadores Técnicos
+        # 1. Indicadores Técnicos y Desvíos EMA200
         hist["EMA200"] = hist["Close"].ewm(span=200, adjust=False).mean()
         precio_actual = hist["Close"].iloc[-1]
         ema200_actual = hist["EMA200"].iloc[-1]
@@ -95,9 +124,14 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
         dist_ema200_pct = ((precio_actual - ema200_actual) / ema200_actual) * 100
         rsi = calcular_rsi(hist["Close"], 14)
 
+        # Histórico de distancias % respecto a EMA200
         hist["Dist_EMA200_Hist"] = ((hist["Close"] - hist["EMA200"]) / hist["EMA200"]) * 100
-        desvio_inferior_prom = hist[hist["Dist_EMA200_Hist"] < 0]["Dist_EMA200_Hist"].mean()
+        
+        # Desvío Positivo (Precio > EMA200) y Desvío Negativo (Precio < EMA200)
+        desvio_pos_prom = hist[hist["Dist_EMA200_Hist"] > 0]["Dist_EMA200_Hist"].mean()
+        desvio_neg_prom = hist[hist["Dist_EMA200_Hist"] < 0]["Dist_EMA200_Hist"].mean()
 
+        # Posición 52 Semanas
         low_52 = hist["Low"].tail(252).min()
         high_52 = hist["High"].tail(252).max()
         pos_52_pct = ((precio_actual - low_52) / (high_52 - low_52)) * 100 if high_52 > low_52 else 50.0
@@ -128,53 +162,46 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
         if target_price and precio_actual > 0:
             upside_target_pct = ((target_price - precio_actual) / precio_actual) * 100
 
-        # CÁLCULO DEL SCORE
+        # CÁLCULO DEL SCORE SYSTEM
         score_fund = 0
         score_tec = 0
         score_riesgo = 0
 
+        # Valuación
         if fcf_yield is not None:
-            if fcf_yield > 5.0:
-                score_fund += 2
-            elif 3.0 <= fcf_yield <= 5.0:
-                score_fund += 1
+            if fcf_yield > 5.0: score_fund += 2
+            elif 3.0 <= fcf_yield <= 5.0: score_fund += 1
 
+        # Calidad / Solvencia
         if roe_pct is not None and debt_to_equity is not None:
-            if roe_pct > 15.0 and debt_to_equity < 100.0:
-                score_fund += 2
-            elif debt_to_equity > 200.0:
-                score_fund -= 2
+            if roe_pct > 15.0 and debt_to_equity < 100.0: score_fund += 2
+            elif debt_to_equity > 200.0: score_fund -= 2
 
-        if current_ratio and current_ratio > 1.5:
-            score_fund += 1
+        if current_ratio and current_ratio > 1.5: score_fund += 1
 
+        # Crecimiento
         if rev_growth_pct is not None and earn_growth_pct is not None:
-            if rev_growth_pct > 10.0 and earn_growth_pct > 10.0:
-                score_fund += 2
-            elif rev_growth_pct > 10.0 or earn_growth_pct > 10.0:
-                score_fund += 1
-            elif rev_growth_pct < 0.0 and earn_growth_pct < 0.0:
-                score_fund -= 2
+            if rev_growth_pct > 10.0 and earn_growth_pct > 10.0: score_fund += 2
+            elif rev_growth_pct > 10.0 or earn_growth_pct > 10.0: score_fund += 1
+            elif rev_growth_pct < 0.0 and earn_growth_pct < 0.0: score_fund -= 2
 
-        if pd.notna(desvio_inferior_prom) and dist_ema200_pct <= desvio_inferior_prom and rsi < 45:
+        # Precio / AT (Usa el desvío negativo histórico)
+        if pd.notna(desvio_neg_prom) and dist_ema200_pct <= desvio_neg_prom and rsi < 45:
             score_tec += 2
         
         if rsi > 75:
             score_tec -= 1
 
+        # Riesgo
         if rev_growth_pct is not None and rev_growth_pct < 0.0 and (profit_margins and profit_margins < 0.05):
             score_riesgo -= 3
 
         score_total = score_fund + score_tec + score_riesgo
 
-        if score_total >= 6:
-            tier = "🟢 PRIORITARIO"
-        elif 2 <= score_total <= 5:
-            tier = "🟡 VIGILAR"
-        elif -1 <= score_total <= 1:
-            tier = "⚪ NEUTRAL"
-        else:
-            tier = "🔴 TRAMPA"
+        if score_total >= 6: tier = "🟢 PRIORITARIO"
+        elif 2 <= score_total <= 5: tier = "🟡 VIGILAR"
+        elif -1 <= score_total <= 1: tier = "⚪ NEUTRAL"
+        else: tier = "🔴 TRAMPA"
 
         return {
             "Ticker": ticker_sym,
@@ -185,6 +212,8 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
             "Tier": tier,
             "FCF_Yield_%": round(fcf_yield, 2) if fcf_yield is not None else None,
             "Dist_EMA200_%": round(dist_ema200_pct, 2),
+            "Prom_Desvio_Sup_%": round(desvio_pos_prom, 2) if pd.notna(desvio_pos_prom) else None,
+            "Prom_Desvio_Inf_%": round(desvio_neg_prom, 2) if pd.notna(desvio_neg_prom) else None,
             "RSI": round(rsi, 2) if pd.notna(rsi) else None,
             "Pos_52W_%": round(pos_52_pct, 1),
             "PEG": round(peg_ratio, 2) if peg_ratio else None,
@@ -200,11 +229,10 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
 
 
 # ==============================================================================
-# ETAPA 3: ALERTAS Y TELEGRAM
+# ETAPA 3: ALERTAS Y CONTROL ANTI-SPAM
 # ==============================================================================
 def enviar_telegram(mensaje: str):
-    if not TELEGRAM_TOKEN:
-        return
+    if not TELEGRAM_TOKEN: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
     try:
@@ -214,8 +242,7 @@ def enviar_telegram(mensaje: str):
 
 
 def enviar_documento_telegram(ruta_archivo: str, caption: str = ""):
-    if not TELEGRAM_TOKEN or not os.path.exists(ruta_archivo):
-        return
+    if not TELEGRAM_TOKEN or not os.path.exists(ruta_archivo): return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
     try:
         with open(ruta_archivo, "rb") as doc:
@@ -230,17 +257,14 @@ def enviar_documento_telegram(ruta_archivo: str, caption: str = ""):
 def cargar_historial_alertas() -> dict:
     if os.path.exists(ARCHIVO_HISTORIAL):
         try:
-            with open(ARCHIVO_HISTORIAL, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+            with open(ARCHIVO_HISTORIAL, "r") as f: return json.load(f)
+        except Exception: return {}
     return {}
 
 
 def guardar_historial_alertas(historial: dict):
     try:
-        with open(ARCHIVO_HISTORIAL, "w") as f:
-            json.dump(historial, f, indent=4)
+        with open(ARCHIVO_HISTORIAL, "w") as f: json.dump(historial, f, indent=4)
     except Exception as e:
         print(f"Error guardando historial: {e}")
 
@@ -263,8 +287,7 @@ def evaluar_condiciones_alerta(row: pd.Series, historial: dict) -> str:
                 fecha_ultima_envio = datetime.datetime.strptime(historial[clave_unica], "%Y-%m-%d").date()
                 if (fecha_actual - fecha_ultima_envio).days < DIAS_ENFRIAMIENTO:
                     debe_enviar = False
-            except Exception:
-                debe_enviar = True
+            except Exception: debe_enviar = True
 
         if debe_enviar:
             enviar_telegram(mensaje)
@@ -281,7 +304,7 @@ def evaluar_condiciones_alerta(row: pd.Series, historial: dict) -> str:
 
 
 # ==============================================================================
-# ETAPA 4: HTML Y ESTILOS POR INDICADOR
+# ETAPA 4: HTML CON COLORES DE INDICADORES Y MATRIZ ORDENADA
 # ==============================================================================
 def obtener_estilo_columna(col: str, val):
     if pd.isna(val) or val is None or val == "N/A":
@@ -407,8 +430,11 @@ def ejecutar_screener_cartera():
     df_total = pd.concat([df_cartera, df_watchlist], ignore_index=True)
 
     if df_total.empty:
-        print("⚠️ No se encontraron activos.")
+        print("⚠️ No se encontraron activos válidos.")
         return
+
+    # Eliminar duplicados si un ticker está en ambas listas
+    df_total = df_total.drop_duplicates(subset=["Ticker"], keep="first")
 
     historial_alertas = cargar_historial_alertas()
 
@@ -431,9 +457,11 @@ def ejecutar_screener_cartera():
     df_final = pd.DataFrame(resultados)
     df_final = df_final.sort_values(by="Score_Total", ascending=False).reset_index(drop=True)
 
+    # Columnas ordenadas exactamente como corresponde
     cols_orden = [
         "Score_Total", "Score_Fund", "Score_Tec", "Tier", "Origen",
-        "Ticker", "Precio_Live", "FCF_Yield_%", "Dist_EMA200_%", "RSI",
+        "Ticker", "Precio_Live", "FCF_Yield_%", 
+        "Dist_EMA200_%", "Prom_Desvio_Sup_%", "Prom_Desvio_Inf_%", "RSI",
         "Pos_52W_%", "PEG", "ROE_%", "D/E", "Current_Ratio", "Ventas_Growth_%", "Upside_Target_%"
     ]
 
