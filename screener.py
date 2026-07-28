@@ -14,10 +14,7 @@ import yfinance as yf
 # CONFIGURACIÓN GENERAL Y ENLACES
 # ==============================================================================
 URL_CARTERA_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRbLGRdor-TtNOtkqL0cbrTnUN0mg6-FLM-3yAxuZsznZRUJjeqoyWC7ZubG6kp1SEgYvcryTnb1eyE/pub?gid=0&single=true&output=csv"
-
-# Enlace publicado como CSV de tu pestaña WATCHLIST (deja vacío "" si aún no la publicas)
 URL_WATCHLIST_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRbLGRdor-TtNOtkqL0cbrTnUN0mg6-FLM-3yAxuZsznZRUJjeqoyWC7ZubG6kp1SEgYvcryTnb1eyE/pub?gid=440350475&single=true&output=csv"
-
 
 TELEGRAM_TOKEN = "8813853886:AAEh6iYqi7YnnXk_HzeTTuHMDOX6Q153Ero"
 TELEGRAM_CHAT_ID = "928199102"
@@ -27,14 +24,13 @@ DIAS_ENFRIAMIENTO = 7
 
 
 # ==============================================================================
-# ETAPA 1: LECTURA DE GOOGLE SHEETS (CON FILTRO DE CATEGORÍA/ESTADO)
+# ETAPA 1: LECTURA DE GOOGLE SHEETS
 # ==============================================================================
 def aplicar_filtro_categoria(df: pd.DataFrame) -> pd.DataFrame:
     """Filtra filas inactivas o ignoradas si existe una columna de estado/categoría/filtro."""
     if df.empty:
         return df
 
-    # Buscar columnas habituales de filtro
     cols_posibles = [col for col in df.columns if str(col).strip().upper() in [
         "FILTRO", "CATEGORIA", "ESTADO", "ANALIZAR", "ACTIVO", "INCLUIR", "STATUS"
     ]]
@@ -43,11 +39,8 @@ def aplicar_filtro_categoria(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     col_filtro = cols_posibles[0]
-    
-    # Normalizar valores a string
     val_filtro = df[col_filtro].astype(str).str.strip().str.upper()
 
-    # Descartar filas explícitamente desactivadas
     valores_excluir = ["NO", "IGNORAR", "INACTIVO", "FALSE", "0", "OFF", "DESACTIVADO", "N"]
     df_filtrado = df[~val_filtro.isin(valores_excluir)].copy()
 
@@ -124,14 +117,11 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
         dist_ema200_pct = ((precio_actual - ema200_actual) / ema200_actual) * 100
         rsi = calcular_rsi(hist["Close"], 14)
 
-        # Histórico de distancias % respecto a EMA200
         hist["Dist_EMA200_Hist"] = ((hist["Close"] - hist["EMA200"]) / hist["EMA200"]) * 100
         
-        # Desvío Positivo (Precio > EMA200) y Desvío Negativo (Precio < EMA200)
         desvio_pos_prom = hist[hist["Dist_EMA200_Hist"] > 0]["Dist_EMA200_Hist"].mean()
         desvio_neg_prom = hist[hist["Dist_EMA200_Hist"] < 0]["Dist_EMA200_Hist"].mean()
 
-        # Posición 52 Semanas
         low_52 = hist["Low"].tail(252).min()
         high_52 = hist["High"].tail(252).max()
         pos_52_pct = ((precio_actual - low_52) / (high_52 - low_52)) * 100 if high_52 > low_52 else 50.0
@@ -185,7 +175,7 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
             elif rev_growth_pct > 10.0 or earn_growth_pct > 10.0: score_fund += 1
             elif rev_growth_pct < 0.0 and earn_growth_pct < 0.0: score_fund -= 2
 
-        # Precio / AT (Usa el desvío negativo histórico)
+        # Precio / AT
         if pd.notna(desvio_neg_prom) and dist_ema200_pct <= desvio_neg_prom and rsi < 45:
             score_tec += 2
         
@@ -229,7 +219,7 @@ def obtener_metricas_completas(ticker_sym: str) -> dict:
 
 
 # ==============================================================================
-# ETAPA 3: ALERTAS Y CONTROL ANTI-SPAM
+# ETAPA 3: ALERTAS Y TELEGRAM
 # ==============================================================================
 def enviar_telegram(mensaje: str):
     if not TELEGRAM_TOKEN: return
@@ -304,7 +294,7 @@ def evaluar_condiciones_alerta(row: pd.Series, historial: dict) -> str:
 
 
 # ==============================================================================
-# ETAPA 4: HTML CON COLORES DE INDICADORES Y MATRIZ ORDENADA
+# ETAPA 4: HTML CON DOS TABLAS (CARTERA REDUCIDA Y WATCHLIST COMPLETA)
 # ==============================================================================
 def obtener_estilo_columna(col: str, val):
     if pd.isna(val) or val is None or val == "N/A":
@@ -346,7 +336,10 @@ def obtener_estilo_columna(col: str, val):
     return "", val_fmt
 
 
-def generar_reporte_html(df: pd.DataFrame) -> str:
+def renderizar_tabla_html(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "<p style='color: #94a3b8; text-align: center;'>No hay datos para mostrar.</p>"
+
     cols = df.columns.tolist()
     filas_html = []
 
@@ -374,16 +367,54 @@ def generar_reporte_html(df: pd.DataFrame) -> str:
     headers_html = "".join([f"<th>{col}</th>" for col in cols])
     body_html = "".join(filas_html)
 
+    return f"""
+    <div class="table-container">
+        <table>
+            <thead><tr>{headers_html}</tr></thead>
+            <tbody>{body_html}</tbody>
+        </table>
+    </div>
+    """
+
+
+def generar_reporte_html_dos_tablas(df_total: pd.DataFrame) -> str:
+    # 1. TABLA CARTERA REDUCIDA
+    cols_cartera_deseadas = [
+        "Score_Total", "Score_Fund", "Score_Tec", "Ticker", "Precio_Live", 
+        "Dist_EMA200_%", "Prom_Desvio_Sup_%", "Prom_Desvio_Inf_%", "RSI", 
+        "ROE_%", "Current_Ratio", "Ventas_Growth_%", "Upside_Target_%"
+    ]
+    
+    df_cartera = df_total[df_total["Origen"] == "CARTERA"].copy()
+    cols_cartera_existentes = [c for c in cols_cartera_deseadas if c in df_cartera.columns]
+    df_cartera_filtrada = df_cartera[cols_cartera_existentes]
+
+    # 2. TABLA WATCHLIST COMPLETA (Toda la matriz)
+    cols_watchlist_orden = [
+        "Score_Total", "Score_Fund", "Score_Tec", "Tier", "Origen",
+        "Ticker", "Precio_Live", "FCF_Yield_%", 
+        "Dist_EMA200_%", "Prom_Desvio_Sup_%", "Prom_Desvio_Inf_%", "RSI",
+        "Pos_52W_%", "PEG", "ROE_%", "D/E", "Current_Ratio", "Ventas_Growth_%", "Upside_Target_%"
+    ]
+    cols_watchlist_existentes = [c for c in cols_watchlist_orden if c in df_total.columns]
+    df_watchlist_completa = df_total[cols_watchlist_existentes]
+
+    # Generar fragmentos HTML de cada tabla
+    html_tabla_cartera = renderizar_tabla_html(df_cartera_filtrada)
+    html_tabla_watchlist = renderizar_tabla_html(df_watchlist_completa)
+
+    # Documento HTML Final Concatenado
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="utf-8">
+        <title>Monitor Value Score System</title>
         <style>
-            body {{ font-family: 'Segoe UI', sans-serif; background-color: #0f172a; color: #e2e8f0; padding: 15px; margin: 0; }}
-            h2 {{ color: #38bdf8; text-align: center; margin-bottom: 5px; }}
-            p.subtitle {{ color: #94a3b8; text-align: center; font-size: 12px; margin-bottom: 20px; }}
-            .table-container {{ overflow-x: auto; background: #1e293b; border-radius: 8px; border: 1px solid #334155; }}
+            body {{ font-family: 'Segoe UI', sans-serif; background-color: #0f172a; color: #e2e8f0; padding: 20px; margin: 0; }}
+            h2 {{ color: #38bdf8; text-align: left; margin-top: 30px; margin-bottom: 10px; border-bottom: 2px solid #334155; padding-bottom: 8px; }}
+            p.subtitle {{ color: #94a3b8; font-size: 13px; margin-bottom: 15px; }}
+            .table-container {{ overflow-x: auto; background: #1e293b; border-radius: 8px; border: 1px solid #334155; margin-bottom: 30px; }}
             table {{ width: 100%; border-collapse: collapse; font-size: 12px; text-align: center; }}
             th {{ background-color: #0f172a; color: #94a3b8; padding: 10px; border-bottom: 2px solid #334155; }}
             td {{ padding: 8px 6px; border-bottom: 1px solid #334155; white-space: nowrap; }}
@@ -401,14 +432,16 @@ def generar_reporte_html(df: pd.DataFrame) -> str:
         </style>
     </head>
     <body>
-        <h2>📈 Monitor Value Score System</h2>
-        <p class="subtitle">Ordenado por Score Total</p>
-        <div class="table-container">
-            <table>
-                <thead><tr>{headers_html}</tr></thead>
-                <tbody>{body_html}</tbody>
-            </table>
-        </div>
+        <h1 style="color: #f8fafc; text-align: center; margin-bottom: 5px;">📈 Monitor Value Score System</h1>
+        <p style="text-align: center; color: #64748b; font-size: 12px; margin-bottom: 25px;">Generado automáticamente para Telegram</p>
+
+        <h2>💼 MI CARTERA (RESUMEN EJECUTIVO)</h2>
+        <p class="subtitle">Métricas esenciales de tus posiciones actuales</p>
+        {html_tabla_cartera}
+
+        <h2>👀 WATCHLIST COMPLETA & MERCADO</h2>
+        <p class="subtitle">Análisis integral ordenado por Score Total</p>
+        {html_tabla_watchlist}
     </body>
     </html>
     """
@@ -433,7 +466,7 @@ def ejecutar_screener_cartera():
         print("⚠️ No se encontraron activos válidos.")
         return
 
-    # Eliminar duplicados si un ticker está en ambas listas
+    # Eliminar duplicados si un ticker está en ambas listas (prioriza Cartera)
     df_total = df_total.drop_duplicates(subset=["Ticker"], keep="first")
 
     historial_alertas = cargar_historial_alertas()
@@ -457,18 +490,8 @@ def ejecutar_screener_cartera():
     df_final = pd.DataFrame(resultados)
     df_final = df_final.sort_values(by="Score_Total", ascending=False).reset_index(drop=True)
 
-    # Columnas ordenadas exactamente como corresponde
-    cols_orden = [
-        "Score_Total", "Score_Fund", "Score_Tec", "Tier", "Origen",
-        "Ticker", "Precio_Live", "FCF_Yield_%", 
-        "Dist_EMA200_%", "Prom_Desvio_Sup_%", "Prom_Desvio_Inf_%", "RSI",
-        "Pos_52W_%", "PEG", "ROE_%", "D/E", "Current_Ratio", "Ventas_Growth_%", "Upside_Target_%"
-    ]
-
-    df_reporte = df_final[cols_orden].copy()
-
-    ruta_html = generar_reporte_html(df_reporte)
-    enviar_documento_telegram(ruta_html, caption="📊 Reporte consolidado con Score System adjunto.")
+    ruta_html = generar_reporte_html_dos_tablas(df_final)
+    enviar_documento_telegram(ruta_html, caption="📊 Reporte consolidado (Cartera + Watchlist) adjunto.")
 
 
 if __name__ == "__main__":
