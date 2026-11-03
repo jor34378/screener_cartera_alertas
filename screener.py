@@ -16,7 +16,7 @@ import yfinance as yf
 URL_CARTERA_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRbLGRdor-TtNOtkqL0cbrTnUN0mg6-FLM-3yAxuZsznZRUJjeqoyWC7ZubG6kp1SEgYvcryTnb1eyE/pub?gid=0&single=true&output=csv"
 URL_WATCHLIST_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRbLGRdor-TtNOtkqL0cbrTnUN0mg6-FLM-3yAxuZsznZRUJjeqoyWC7ZubG6kp1SEgYvcryTnb1eyE/pub?gid=440350475&single=true&output=csv"
 
-TELEGRAM_TOKEN = "8813853886:AAEh6iYqi7YnnXk_HzeTTuHMDOX6Q153Ero"
+TELEGRAM_TOKEN = "8677309783:AAEFqB-VdfDqAYEvRcM4LXFrpDgLgbhX3To"
 TELEGRAM_CHAT_ID = "928199102"
 
 ARCHIVO_HISTORIAL = "alertas_enviadas.json"
